@@ -35,6 +35,12 @@ import {
   GraduationCap,
   Network,
   Check,
+  Copy,
+  Download,
+  MoreHorizontal,
+  RotateCcw,
+  ThumbsDown,
+  ThumbsUp,
 } from 'lucide-react';
 
 const promptGroups = {
@@ -244,6 +250,16 @@ export default function App() {
   const [connectorFilter, setConnectorFilter] = useState('all');
   const [selectedConnector, setSelectedConnector] = useState(null);
   const [providerSettings, setProviderSettings] = useState(defaultProviderSettings);
+  const [runHistory, setRunHistory] = useState([]);
+  const [automationItems, setAutomationItems] = useState([]);
+  const [chatMessages, setChatMessages] = useState([
+    {
+      role: 'assistant',
+      content: 'Ask me to research, plan, code, summarize, or route work to a connected model runtime.',
+    },
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatSending, setIsChatSending] = useState(false);
   const [chatPaneWidth, setChatPaneWidth] = useState(450);
   const [isDraggingDivider, setIsDraggingDivider] = useState(false);
   const [isComposerMenuOpen, setIsComposerMenuOpen] = useState(false);
@@ -254,11 +270,21 @@ export default function App() {
     social: false,
   });
   const [selectedAutomationSection, setSelectedAutomationSection] = useState('status-reports');
+  const [isAutomationComposerOpen, setIsAutomationComposerOpen] = useState(false);
+  const [automationDraft, setAutomationDraft] = useState({
+    title: '',
+    prompt: '',
+    target: 'Worktree',
+    project: 'OpenWork',
+    schedule: 'Daily at 9:00 AM',
+  });
+  const [activeChatExportMenu, setActiveChatExportMenu] = useState(null);
 
   const chatEndRef = useRef(null);
   const pollRef = useRef(null);
   const taskLayoutRef = useRef(null);
   const composerMenuRef = useRef(null);
+  const chatExportMenuRef = useRef(null);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -279,6 +305,31 @@ export default function App() {
     } catch {
       // Keep defaults if local storage is unavailable or malformed.
     }
+  }, []);
+
+  useEffect(() => {
+    const loadWorkspaceData = async () => {
+      try {
+        const [tasksResponse, automationsResponse] = await Promise.all([
+          fetch('/api/tasks'),
+          fetch('/api/automations'),
+        ]);
+
+        if (tasksResponse.ok) {
+          const tasksData = await tasksResponse.json();
+          setRunHistory(tasksData.tasks || []);
+        }
+
+        if (automationsResponse.ok) {
+          const automationsData = await automationsResponse.json();
+          setAutomationItems(automationsData.automations || []);
+        }
+      } catch {
+        // Keep UI functional even when backend data is unavailable.
+      }
+    };
+
+    loadWorkspaceData();
   }, []);
 
   useEffect(() => {
@@ -357,6 +408,19 @@ export default function App() {
   }, [isComposerMenuOpen]);
 
   useEffect(() => {
+    if (activeChatExportMenu === null) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (!chatExportMenuRef.current?.contains(event.target)) {
+        setActiveChatExportMenu(null);
+      }
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    return () => window.removeEventListener('mousedown', handlePointerDown);
+  }, [activeChatExportMenu]);
+
+  useEffect(() => {
     if (!agentTask.id || agentTask.status === 'completed' || agentTask.status === 'failed') {
       if (pollRef.current) {
         window.clearTimeout(pollRef.current);
@@ -399,6 +463,10 @@ export default function App() {
     setMessages(task.messages || []);
     setLogs(task.logs || []);
     setIsTyping(task.status === 'running');
+    setRunHistory((prev) => {
+      const rest = prev.filter((item) => item.id !== task.id);
+      return [task, ...rest];
+    });
 
     if (task.status === 'completed' && task.artifacts?.length) {
       setUserFiles((prev) => {
@@ -509,6 +577,85 @@ export default function App() {
     }
   };
 
+  const handleChatSubmit = async () => {
+    const prompt = chatInput.trim();
+    if (!prompt) return;
+
+    const nextMessages = [...chatMessages, { role: 'user', content: prompt }];
+    setChatMessages(nextMessages);
+    setChatInput('');
+    setIsChatSending(true);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: nextMessages,
+          provider: activeProviderConfig.provider,
+          model: activeProviderConfig.model,
+          endpoint: activeProviderConfig.endpoint,
+          apiKey: activeProviderConfig.apiKey,
+          oauthAccessToken: activeProviderConfig.oauth?.accessToken || '',
+        }),
+      });
+
+      const raw = await response.text();
+      let data = {};
+
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error('OpenWork could not read the runtime response. Check the provider endpoint and try again.');
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Chat request failed.');
+      }
+
+      setChatMessages((prev) => [...prev, data.message]);
+    } catch (error) {
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: error instanceof Error ? error.message : 'Chat request failed.',
+          variant: 'error',
+        },
+      ]);
+    } finally {
+      setIsChatSending(false);
+    }
+  };
+
+  const createAutomation = async () => {
+    if (!automationDraft.title.trim() || !automationDraft.prompt.trim()) return;
+
+    try {
+      const response = await fetch('/api/automations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(automationDraft),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to create automation.');
+      }
+
+      setAutomationItems((prev) => [data.automation, ...prev]);
+      setAutomationDraft({
+        title: '',
+        prompt: '',
+        target: 'Worktree',
+        project: 'OpenWork',
+        schedule: 'Daily at 9:00 AM',
+      });
+      setIsAutomationComposerOpen(false);
+    } catch (error) {
+      addLog(error instanceof Error ? error.message : 'Failed to create automation.', 'error');
+    }
+  };
+
   const visibleConnectors = connectors.filter((connector) => {
     const matchesSearch =
       connector.name.toLowerCase().includes(connectorSearch.toLowerCase()) ||
@@ -523,43 +670,104 @@ export default function App() {
       <div className="relative flex h-full w-full overflow-hidden rounded-[18px] border border-zinc-800/80 bg-[#050505] shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
       <aside className="z-20 flex w-[255px] flex-col border-r border-zinc-900 bg-[#070707]">
         <div className="flex h-full flex-col px-4 py-5">
-          <div className="space-y-1">
-            <NavItem icon={<MessageSquare className="h-4 w-4" />} label="Chat" subtle />
-            <NavItem
+	          <div className="space-y-1">
+	            <NavItem icon={<MessageSquare className="h-4 w-4" />} label="Chat" subtle active={view === 'chat'} onClick={() => setView('chat')} />
+	            <NavItem
               icon={<Monitor className="h-4 w-4" />}
               label="OpenWork"
               active={view === 'home' || view === 'active-task'}
               onClick={() => {
                 setView('home');
                 setActiveChip(null);
-              }}
-            />
-          </div>
+	              }}
+	            />
+	          </div>
 
-          <div className="mt-8 space-y-1">
-            <h3 className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-600">Workspace</h3>
-            <NavItem
-              icon={<Plus className="h-4 w-4" />}
-              label="New task"
-              onClick={() => {
-                setView('home');
-                setActiveChip(null);
-              }}
-            />
-            <NavItem
-              icon={<ListTodo className="h-4 w-4" />}
-              label="Tasks"
-              onClick={() => {
-                setView('home');
-                setActiveChip(null);
-              }}
-            />
-            <NavItem icon={<Clock3 className="h-4 w-4" />} label="Automations" active={view === 'automations'} onClick={() => setView('automations')} />
-            <NavItem icon={<FileCode className="h-4 w-4" />} label="Files" active={view === 'files'} onClick={() => setView('files')} />
-            <NavItem icon={<Share2 className="h-4 w-4" />} label="Connectors" active={view === 'connectors'} onClick={() => setView('connectors')} />
-            <NavItem icon={<Zap className="h-4 w-4" />} label="Skills" active={view === 'skills'} onClick={() => setView('skills')} />
-            <NavItem icon={<LayoutGrid className="h-4 w-4" />} label="Use cases" active={view === 'use-cases'} onClick={() => setView('use-cases')} />
-          </div>
+	          {view === 'chat' && (
+	            <div className="mt-8">
+	              <div className="space-y-1">
+	                <NavItem
+	                  icon={<Plus className="h-4 w-4" />}
+	                  label="New thread"
+	                  subtle
+	                  onClick={() => setChatMessages([
+	                    {
+	                      role: 'assistant',
+	                      content: 'Ask me to research, plan, code, summarize, or route work to a connected model runtime.',
+	                    },
+	                  ])}
+	                />
+	                <NavItem icon={<Clock3 className="h-4 w-4" />} label="History" subtle />
+	                <NavItem icon={<Search className="h-4 w-4" />} label="Discover" subtle />
+	              </div>
+
+	              <div className="mt-8 border-t border-zinc-900 pt-5">
+	                <h3 className="mb-2 px-3 text-sm text-zinc-500">Recent</h3>
+	                {runHistory.length || chatMessages.length > 1 ? (
+	                  <div className="space-y-1">
+	                    {chatMessages.length > 1 && (
+	                      <button className="w-full rounded-xl px-3 py-2 text-left transition hover:bg-zinc-900/50">
+	                        <p className="truncate text-sm text-zinc-300">Current chat</p>
+	                        <p className="mt-1 truncate text-xs text-zinc-600">
+	                          {chatMessages[chatMessages.length - 1]?.content}
+	                        </p>
+	                      </button>
+	                    )}
+	                    {runHistory.slice(0, 3).map((task) => (
+	                      <button
+	                        key={`recent-${task.id}`}
+	                        onClick={() => {
+	                          syncTaskToView(task);
+	                          setDocTitle(task.prompt?.length > 25 ? `${task.prompt.substring(0, 25)}...` : task.prompt || 'OpenWork task');
+	                          setView('active-task');
+	                        }}
+	                        className="w-full rounded-xl px-3 py-2 text-left transition hover:bg-zinc-900/50"
+	                      >
+	                        <p className="truncate text-sm text-zinc-300">{task.prompt || 'Untitled task'}</p>
+	                        <p className="mt-1 truncate text-xs text-zinc-600">{task.summary || 'OpenWork run'}</p>
+	                      </button>
+	                    ))}
+	                  </div>
+	                ) : (
+	                  <div className="px-3 text-sm leading-6 text-zinc-600">
+	                    Recent and active threads will appear here.
+	                  </div>
+	                )}
+	              </div>
+	            </div>
+	          )}
+
+	          {view !== 'chat' && (
+	            <div className="mt-8 space-y-1">
+	              <h3 className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-600">Workspace</h3>
+	              <NavItem
+	                icon={<Plus className="h-4 w-4" />}
+	                label="New task"
+	                onClick={() => {
+	                  setView('home');
+	                  setActiveChip(null);
+	                }}
+	              />
+	              <NavItem
+	                icon={<ListTodo className="h-4 w-4" />}
+	                label="Tasks"
+	                onClick={() => {
+	                  if (runHistory.length) {
+	                    setView('tasks');
+	                  } else {
+	                    setView('home');
+	                    setActiveChip(null);
+	                  }
+	                }}
+	                active={view === 'tasks'}
+	              />
+	              <NavItem icon={<Clock3 className="h-4 w-4" />} label="Automations" active={view === 'automations'} onClick={() => setView('automations')} />
+	              <NavItem icon={<FileCode className="h-4 w-4" />} label="Files" active={view === 'files'} onClick={() => setView('files')} />
+	              <NavItem icon={<Share2 className="h-4 w-4" />} label="Connectors" active={view === 'connectors'} onClick={() => setView('connectors')} />
+	              <NavItem icon={<Zap className="h-4 w-4" />} label="Skills" active={view === 'skills'} onClick={() => setView('skills')} />
+	              <NavItem icon={<LayoutGrid className="h-4 w-4" />} label="Use cases" active={view === 'use-cases'} onClick={() => setView('use-cases')} />
+	            </div>
+	          )}
 
           <div className="mt-auto border-t border-zinc-900 pt-4 text-xs">
             <button
@@ -576,6 +784,257 @@ export default function App() {
       </aside>
 
       <main className="relative flex flex-1 flex-col overflow-hidden">
+        {view === 'chat' && (
+          <div className="animate-in fade-in relative flex flex-1 overflow-hidden bg-[#171414] duration-500">
+            <div className="mx-auto flex h-full w-full max-w-[1040px] flex-col px-8 pb-4 pt-8 md:px-12">
+              <div className="mb-6 flex items-center justify-between">
+                <div className="text-[12px] uppercase tracking-[0.16em] text-zinc-500">{activeProviderConfig.label} · {activeProviderConfig.model}</div>
+                <button
+                  onClick={() => setChatMessages([
+                    {
+                      role: 'assistant',
+                      content: 'Ask me to research, plan, code, summarize, or route work to a connected model runtime.',
+                    },
+                  ])}
+                  className="rounded-2xl border border-zinc-800 bg-[#1c1918] px-4 py-2 text-sm text-zinc-400 transition hover:border-zinc-700 hover:bg-[#24201f] hover:text-white"
+                >
+                  New thread
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <div className="mx-auto flex min-h-full w-full max-w-[700px] flex-col pb-16 pt-14">
+                  <div className="space-y-14">
+                    {chatMessages.map((message, index) => (
+                      <div key={`${message.role}-${index}`} className={message.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
+                        <div className={message.role === 'user' ? 'max-w-[220px]' : 'w-full max-w-[640px]'}>
+                          <div
+                            className={
+                              message.role === 'user'
+                                ? 'inline-flex rounded-[20px] bg-[#211d1b] px-5 py-3 text-[15px] text-zinc-100'
+                                : message.variant === 'error'
+                                  ? 'rounded-[20px] border border-amber-500/20 bg-amber-500/8 px-5 py-4 text-[15px] leading-8 text-amber-100'
+                                  : 'text-[17px] leading-[1.85] text-zinc-200'
+                            }
+                          >
+                            {message.content}
+                          </div>
+
+                          {message.role === 'assistant' ? (
+                            <div className="mt-5 flex items-center gap-3 text-zinc-600">
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <Share2 className="h-4 w-4" />
+                              </button>
+                              <div className="relative" ref={activeChatExportMenu === index ? chatExportMenuRef : null}>
+                                <button
+                                  onClick={() => setActiveChatExportMenu(activeChatExportMenu === index ? null : index)}
+                                  className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300"
+                                >
+                                  <Download className="h-4 w-4" />
+                                </button>
+                                {activeChatExportMenu === index && (
+                                  <div className="absolute left-0 top-8 z-20 w-40 rounded-2xl border border-zinc-800 bg-[#1c1a19] p-2 shadow-[0_20px_40px_rgba(0,0,0,0.45)]">
+                                    <ExportMenuItem label="PDF" badge="PDF" />
+                                    <ExportMenuItem label="Markdown" badge="MD" />
+                                    <ExportMenuItem label="DOCX" badge="DOCX" />
+                                  </div>
+                                )}
+                              </div>
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <Copy className="h-4 w-4" />
+                              </button>
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <RotateCcw className="h-4 w-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="mt-5 flex items-center justify-end gap-4 text-zinc-600">
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <ThumbsUp className="h-4 w-4" />
+                              </button>
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <ThumbsDown className="h-4 w-4" />
+                              </button>
+                              <button className="rounded-md p-1 transition hover:bg-white/5 hover:text-zinc-300">
+                                <MoreHorizontal className="h-4 w-4" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mx-auto w-full max-w-[720px] pb-3">
+                <div className="rounded-[24px] border border-zinc-800 bg-[#1d1a19] px-5 py-4 shadow-[0_18px_40px_rgba(0,0,0,0.38)]">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleChatSubmit();
+                    }}
+                    className="space-y-3"
+                  >
+                    <textarea
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Ask a follow-up"
+                      rows={2}
+                      className="w-full resize-none border-none bg-transparent p-0 text-[15px] leading-7 text-white outline-none placeholder:text-zinc-600"
+                    />
+
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4 text-zinc-500">
+                        <button type="button" className="transition hover:text-zinc-300">
+                          <Plus className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-4">
+                        <button type="button" className="text-sm text-zinc-500 transition hover:text-zinc-300">
+                          Model
+                        </button>
+                        <button type="button" className="text-zinc-500 transition hover:text-zinc-300">
+                          <Mic className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isChatSending || !chatInput.trim()}
+                          className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-300 text-black transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-500"
+                        >
+                          <ArrowRight className="h-4 w-4 -rotate-45 text-black" />
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {view === 'chat-legacy' && (
+          <div className="animate-in fade-in flex flex-1 flex-col p-8 duration-500 md:p-12">
+            <div className="mx-auto flex h-full w-full max-w-[980px] flex-col">
+              <div className="mb-6">
+                <h1 className="mb-2 text-3xl text-white">Chat</h1>
+                <p className="text-sm text-zinc-500">
+                  Direct conversation with {activeProviderConfig.label}. Use this for faster iteration before handing work off to a full OpenWork run.
+                </p>
+              </div>
+
+              <div className="mb-4 flex items-center justify-between rounded-2xl border border-zinc-800 bg-[#101012] px-4 py-3">
+                <div className="text-sm text-zinc-300">
+                  <span className="font-medium text-white">{activeProviderConfig.label}</span> · {activeProviderConfig.model}
+                </div>
+                {isChatSending && <span className="text-xs uppercase tracking-[0.18em] text-zinc-500">Thinking</span>}
+              </div>
+
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-zinc-800 bg-[#0d0d0f]">
+                <div className="flex-1 space-y-4 overflow-y-auto p-5">
+                  {chatMessages.map((message, index) => (
+                    <div key={`${message.role}-${index}`} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-7 ${message.role === 'user' ? 'bg-white text-black' : 'bg-[#17181c] text-zinc-300'}`}>
+                        {message.content}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="border-t border-zinc-800 p-4">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleChatSubmit();
+                    }}
+                    className="flex items-center gap-3"
+                  >
+                    <input
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Ask OpenWork something..."
+                      className="flex-1 rounded-2xl border border-zinc-800 bg-[#151518] px-4 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-zinc-700"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isChatSending || !chatInput.trim()}
+                      className="rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:bg-zinc-800 disabled:text-zinc-500"
+                    >
+                      Send
+                    </button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {view === 'tasks' && (
+          <div className="animate-in fade-in flex-1 overflow-y-auto p-8 duration-500 md:p-12">
+            <div className="mx-auto max-w-[1080px]">
+              <div className="mb-10 flex items-end justify-between gap-4">
+                <div>
+                  <h1 className="mb-2 text-3xl text-white">Tasks</h1>
+                  <p className="text-sm text-zinc-500">
+                    Reopen recent OpenWork runs, inspect status, and jump back into an active workspace.
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setView('home');
+                    setActiveChip(null);
+                  }}
+                  className="rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200"
+                >
+                  New task
+                </button>
+              </div>
+
+              {runHistory.length === 0 ? (
+                <div className="rounded-[28px] border border-dashed border-zinc-800 bg-[#0d0d0f] px-6 py-20 text-center">
+                  <ListTodo className="mx-auto mb-5 h-8 w-8 text-zinc-600" />
+                  <p className="text-sm text-zinc-500">No runs yet. Start a task from the home screen to create your first workspace.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {runHistory.map((task) => (
+                    <button
+                      key={task.id}
+                      onClick={() => {
+                        syncTaskToView(task);
+                        setDocTitle(task.prompt?.length > 25 ? `${task.prompt.substring(0, 25)}...` : task.prompt || 'OpenWork task');
+                        setView('active-task');
+                      }}
+                      className="flex w-full items-center justify-between gap-4 rounded-[24px] border border-zinc-800 bg-[#0f0f11] px-5 py-4 text-left transition hover:border-zinc-700 hover:bg-[#151518]"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="mb-1 flex items-center gap-3">
+                          <span className="truncate text-base font-medium text-white">{task.prompt || 'Untitled task'}</span>
+                          <span className={`rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${
+                            task.status === 'completed'
+                              ? 'bg-emerald-500/15 text-emerald-300'
+                              : task.status === 'failed'
+                                ? 'bg-rose-500/15 text-rose-300'
+                                : 'bg-blue-500/15 text-blue-300'
+                          }`}>
+                            {task.status}
+                          </span>
+                        </div>
+                        <p className="truncate text-sm text-zinc-400">
+                          {task.provider || 'runtime'} · {task.model || 'default model'} · {task.summary || 'OpenWork run'}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right text-xs text-zinc-500">
+                        <div>{task.createdAt ? new Date(task.createdAt).toLocaleDateString() : 'Today'}</div>
+                        <div className="mt-1">{task.artifacts?.length || 0} artifact{task.artifacts?.length === 1 ? '' : 's'}</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {view === 'home' && (
           <div className="animate-in fade-in relative flex flex-1 flex-col px-7 pb-16 pt-8 duration-700">
             <div className="pointer-events-none absolute inset-x-0 top-0 h-56 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.03),transparent_60%)]" />
@@ -704,6 +1163,43 @@ export default function App() {
                 </div>
               </div>
             )}
+            </div>
+          </div>
+        )}
+
+        {view === 'tasks' && (
+          <div className="animate-in fade-in flex-1 overflow-y-auto p-8 duration-500 md:p-12">
+            <div className="mx-auto max-w-[1080px]">
+              <h1 className="mb-2 text-3xl text-white">Tasks</h1>
+              <p className="mb-8 text-sm text-zinc-500">Recent OpenWork runs, artifacts, and current execution state.</p>
+              <div className="space-y-4">
+                {runHistory.map((task) => (
+                  <button
+                    key={task.id}
+                    onClick={() => {
+                      syncTaskToView(task);
+                      setDocTitle(task.prompt?.length > 25 ? `${task.prompt.substring(0, 25)}...` : task.prompt || 'Task');
+                      setView('active-task');
+                    }}
+                    className="w-full rounded-[24px] border border-zinc-800 bg-[#101012] p-5 text-left transition hover:bg-[#141518]"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <h2 className="truncate text-lg font-medium text-white">{task.prompt}</h2>
+                        <p className="mt-2 text-sm leading-6 text-zinc-400">{task.summary || 'Task run recorded in OpenWork.'}</p>
+                      </div>
+                      <span className={`shrink-0 rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${task.status === 'completed' ? 'bg-emerald-400/15 text-emerald-300' : task.status === 'failed' ? 'bg-rose-400/15 text-rose-300' : 'bg-blue-400/15 text-blue-300'}`}>
+                        {task.status}
+                      </span>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-4 text-xs uppercase tracking-[0.18em] text-zinc-500">
+                      <span>{task.provider}</span>
+                      <span>{task.model}</span>
+                      <span>{new Date(task.createdAt).toLocaleString()}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -986,10 +1482,41 @@ export default function App() {
                   <h1 className="mb-2 text-3xl text-white">Automations</h1>
                   <p className="text-sm text-zinc-500">Automate work by setting up scheduled threads. <span className="text-blue-400">Learn more</span></p>
                 </div>
-                <button className="rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200">
+                <button
+                  onClick={() => setIsAutomationComposerOpen(true)}
+                  className="rounded-2xl bg-white px-5 py-3 text-sm font-medium text-black transition hover:bg-zinc-200"
+                >
                   + New automation
                 </button>
               </div>
+
+              {automationItems.length > 0 && (
+                <div className="mb-10 rounded-[28px] border border-zinc-800 bg-[#0d0d0f] p-6">
+                  <div className="mb-5 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-500">Current</p>
+                      <h2 className="mt-2 text-xl font-medium text-white">Scheduled automations</h2>
+                    </div>
+                    <span className="rounded-full bg-zinc-800 px-3 py-1 text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+                      {automationItems.length} active
+                    </span>
+                  </div>
+                  <div className="space-y-3">
+                    {automationItems.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between gap-4 rounded-2xl border border-zinc-800 bg-[#121215] px-4 py-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-white">{item.title}</p>
+                          <p className="truncate text-sm text-zinc-500">{item.project} · {item.target} · {item.prompt}</p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="text-sm text-zinc-300">{item.schedule}</p>
+                          <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-zinc-500">{item.status}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="grid gap-8 lg:grid-cols-[180px_minmax(0,1fr)]">
                 <div className="space-y-2 pt-1">
@@ -1005,14 +1532,27 @@ export default function App() {
                 </div>
 
                 <div className="space-y-10">
-                  {automationSections.map((section) => (
+                  {automationSections
+                    .filter((section) => section.id === selectedAutomationSection)
+                    .map((section) => (
                     <div key={section.id}>
                       <div className="mb-5 border-b border-zinc-800 pb-3">
                         <h2 className="text-[18px] font-medium text-white">{section.name}</h2>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
                         {section.templates.map((template) => (
-                          <AutomationTemplateCard key={template.id} {...template} />
+                          <AutomationTemplateCard
+                            key={template.id}
+                            {...template}
+                            onClick={() => {
+                              setAutomationDraft((prev) => ({
+                                ...prev,
+                                title: template.title.split('.')[0],
+                                prompt: template.title,
+                              }));
+                              setIsAutomationComposerOpen(true);
+                            }}
+                          />
                         ))}
                       </div>
                     </div>
@@ -1182,6 +1722,95 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {isAutomationComposerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-[4px]">
+          <div className="w-full max-w-[900px] rounded-[30px] border border-zinc-800 bg-[#171719] p-5 shadow-[0_30px_120px_rgba(0,0,0,0.75)]">
+            <div className="rounded-[26px] border border-zinc-800 bg-[#212124] p-5">
+              <div className="mb-5 flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">New automation</p>
+                  <h2 className="mt-2 text-2xl font-medium text-white">Schedule recurring work in OpenWork</h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAutomationComposerOpen(false)}
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-zinc-700 text-zinc-400 transition hover:border-zinc-500 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <input
+                  value={automationDraft.title}
+                  onChange={(e) => setAutomationDraft((prev) => ({ ...prev, title: e.target.value }))}
+                  placeholder="Automation title"
+                  className="w-full rounded-2xl border border-zinc-800 bg-transparent px-4 py-4 text-lg text-white outline-none placeholder:text-zinc-500 focus:border-zinc-700"
+                />
+                <textarea
+                  value={automationDraft.prompt}
+                  onChange={(e) => setAutomationDraft((prev) => ({ ...prev, prompt: e.target.value }))}
+                  placeholder="Add prompt e.g. summarize GitHub activity, scan incidents, and prepare a standup update."
+                  className="min-h-[260px] w-full resize-none rounded-2xl border border-zinc-800 bg-transparent px-4 py-4 text-sm leading-7 text-white outline-none placeholder:text-zinc-500 focus:border-zinc-700"
+                />
+              </div>
+
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-300">
+                  <select
+                    value={automationDraft.target}
+                    onChange={(e) => setAutomationDraft((prev) => ({ ...prev, target: e.target.value }))}
+                    className="rounded-xl border border-zinc-800 bg-[#18181b] px-4 py-2.5 text-sm text-white outline-none"
+                  >
+                    <option>Worktree</option>
+                    <option>Workspace</option>
+                    <option>Browser</option>
+                  </select>
+                  <select
+                    value={automationDraft.project}
+                    onChange={(e) => setAutomationDraft((prev) => ({ ...prev, project: e.target.value }))}
+                    className="rounded-xl border border-zinc-800 bg-[#18181b] px-4 py-2.5 text-sm text-white outline-none"
+                  >
+                    <option>OpenWork</option>
+                    <option>Research</option>
+                    <option>Operations</option>
+                    <option>Personal</option>
+                  </select>
+                  <select
+                    value={automationDraft.schedule}
+                    onChange={(e) => setAutomationDraft((prev) => ({ ...prev, schedule: e.target.value }))}
+                    className="rounded-xl border border-zinc-800 bg-[#18181b] px-4 py-2.5 text-sm text-white outline-none"
+                  >
+                    <option>Daily at 9:00 AM</option>
+                    <option>Weekdays at 8:30 AM</option>
+                    <option>Friday at 3:00 PM</option>
+                    <option>Every 4 hours</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsAutomationComposerOpen(false)}
+                    className="px-4 py-2.5 text-sm text-zinc-400 transition hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={createAutomation}
+                    disabled={!automationDraft.title.trim() || !automationDraft.prompt.trim()}
+                    className="rounded-2xl bg-white px-5 py-2.5 text-sm font-medium text-black transition hover:bg-zinc-200 disabled:bg-zinc-800 disabled:text-zinc-500"
+                  >
+                    Create
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );
@@ -1235,6 +1864,15 @@ const SourceOption = ({ icon: Icon, label, checked, onClick }) => (
   </button>
 );
 
+const ExportMenuItem = ({ label, badge }) => (
+  <button className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-white/5">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-700 bg-[#201d1c] text-[9px] font-bold uppercase tracking-[0.08em] text-zinc-300">
+      {badge}
+    </div>
+    <span className="text-sm text-zinc-200">{label}</span>
+  </button>
+);
+
 const AutomationGlyph = ({ icon, tint }) => {
   const common = `h-6 w-6 ${tint}`;
 
@@ -1272,8 +1910,8 @@ const SkillCard = ({ name, category, status, description, accent }) => (
   </button>
 );
 
-const AutomationTemplateCard = ({ title, icon, tint }) => (
-  <button className="rounded-[28px] border border-zinc-800 bg-[#262626] p-5 text-left transition hover:border-zinc-700 hover:bg-[#2c2c2c]">
+const AutomationTemplateCard = ({ title, icon, tint, onClick }) => (
+  <button onClick={onClick} className="rounded-[28px] border border-zinc-800 bg-[#262626] p-5 text-left transition hover:border-zinc-700 hover:bg-[#2c2c2c]">
     <div className="mb-4">
       <AutomationGlyph icon={icon} tint={tint} />
     </div>
